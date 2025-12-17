@@ -308,8 +308,6 @@ CREATE TABLE dim_year (
 
 ![diagrama de flujo](diagrama_de_flujo.png)
 
-```
-
 ---
 
 ## 7. Instrucciones de Ejecución
@@ -638,6 +636,3 @@ pd.read_sql("SELECT COUNT(*) FROM fact_sales", engine_pyspark)
 ```
 
 ---
-
-**Proyecto desarrollado como parte del curso RA1 - Análisis y Procesamiento de Datos**
-
