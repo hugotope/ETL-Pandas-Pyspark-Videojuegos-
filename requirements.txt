@@ -1,0 +1,4 @@
+pandas
+pyspark
+sqlalchemy
+jupyter
