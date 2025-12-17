@@ -157,32 +157,49 @@ proyecto-ra1/
 - `data/videogames.csv`
 
 **Acciones realizadas:**
-- Lectura del CSV con Spark usando `spark.read.csv()`
-- Inferencia automática de esquema
-- Carga distribuida del dataset
+- Lectura del archivo CSV desde la carpeta `/data` usando Spark
+- Carga en un Spark DataFrame con `spark.read.csv()`
+- Configuración de `header=True` para usar la primera fila como encabezados
+- Configuración de `inferSchema=True` para detectar automáticamente tipos de datos
+- Verificación de dimensiones y primeras filas
 
 ##### 2. Transformación (T)
 
 **Objetivos:**
-- Aplicar transformaciones distribuidas con Spark
-- Crear el mismo modelo dimensional que en el flujo de Pandas
-- Demostrar capacidades de procesamiento distribuido
+- Limpiar y normalizar los datos usando PySpark
+- Crear un modelo dimensional (esquema en estrella) idéntico al de Pandas
+- Separar dimensiones y hechos de forma distribuida
 
 **Pasos realizados:**
 
-1. **Limpieza con Spark:**
+1. **Limpieza de datos:**
    - Eliminación de duplicados con `dropDuplicates()`
-   - Tratamiento de nulos usando funciones de Spark (`na.fill()`)
-   - Cálculo de medias para imputación usando agregaciones de Spark
+   - Tratamiento de valores problemáticos ("?", "N/A", "") reemplazándolos con "Unknown"
+   - Normalización de columnas numéricas:
+     - Conversión de formatos especiales (valores terminados en "M" para millones, "B" para billones)
+     - Imputación de nulos con la media calculada usando `F.mean()`
+   - Limpieza de columnas categóricas:
+     - Eliminación de espacios con `F.trim()`
+     - Reemplazo de valores problemáticos con "Unknown"
 
-2. **Creación de dimensiones:**
-   - Uso de `distinct()` para obtener valores únicos
-   - Generación de IDs con `row_number()` sobre ventanas
-   - Creación de las mismas dimensiones que en Pandas
+2. **Normalización:**
+   - Conversión de nombres de columnas a `snake_case` usando `toDF()`
+   - Estandarización de formatos
 
-3. **Construcción de la tabla de hechos:**
-   - Joins entre el dataset limpio y las dimensiones usando Spark SQL
-   - Selección de columnas métricas (`copies_sold_millions`, `revenue_millions_usd`)
+3. **Creación de dimensiones:**
+   - `dim_game`: Información única de cada juego (nombre, género)
+   - `dim_platform`: Catálogo de plataformas
+   - `dim_developer`: Información de desarrolladores
+   - `dim_publisher`: Información de publishers
+   - `dim_year`: Catálogo de años
+   - Obtención de valores únicos con `distinct()` y `orderBy()`
+   - Conversión temporal a Pandas para asignar IDs autoincrementales
+   - Recreación como DataFrames de Spark para los joins
+
+4. **Construcción de la tabla de hechos:**
+   - `fact_sales`: Tabla de hechos con relaciones a todas las dimensiones
+   - Joins izquierdos (`how='left'`) entre el dataset limpio y las dimensiones
+   - Selección de IDs de dimensiones y métricas (`copies_sold_millions`, `revenue_millions_usd`)
 
 ##### 3. Carga (L)
 
@@ -190,9 +207,16 @@ proyecto-ra1/
 - Base de datos SQLite: `warehouse/warehouse_pyspark.db`
 
 **Método:**
+- Uso de **Spark JDBC** (Java Database Connectivity) para escribir directamente en SQLite
+- Configuración del driver JDBC de SQLite: `org.sqlite.JDBC`
+- Método `spark.write.jdbc()` para escribir DataFrames directamente sin conversión a Pandas
+- Modo `overwrite` para sobrescribir tablas existentes
+- Creación automática de la carpeta `warehouse` si no existe
+
+**Alternativa (si JDBC no está disponible):**
 - Conversión de DataFrames de Spark a Pandas con `toPandas()`
-- Carga en SQLite mediante SQLAlchemy y `to_sql()`
-- Mismo proceso que en Pandas pero usando datos procesados con Spark
+- Carga en SQLite mediante SQLAlchemy con `to_sql()` e `if_exists="replace"`
+- Uso de transacciones con `engine.begin()` para garantizar atomicidad
 
 ---
 
@@ -352,23 +376,69 @@ Al finalizar, se habrán creado las bases de datos:
 
 ## 8. Cómo se Cargaron los Datos en SQLite
 
-### Proceso de Carga:
+### 8.1 Proceso de Carga con Pandas
 
 1. **Creación de la conexión:**
    - Uso de SQLAlchemy para crear un engine de conexión
-   - Ruta: `sqlite:///warehouse/warehouse_pandas.db` (o `warehouse_pyspark.db`)
+   - Ruta: `sqlite:///warehouse/warehouse_pandas.db`
+   - Creación de la carpeta `warehouse` si no existe
 
 2. **Carga de tablas:**
-   - Para Pandas: uso directo de `to_sql()` sobre DataFrames
-   - Para PySpark: conversión a Pandas con `toPandas()` y luego `to_sql()`
+   - Uso directo de `to_sql()` sobre DataFrames de Pandas
+   - Todas las tablas se cargan dentro de una transacción con `engine.begin()`
 
 3. **Orden de carga:**
-   - Primero se cargan las tablas de dimensiones (sin dependencias)
-   - Luego se carga la tabla de hechos (con claves foráneas)
+   - Primero se cargan las tablas de dimensiones (sin dependencias):
+     - `dim_game`
+     - `dim_platform`
+     - `dim_developer`
+     - `dim_publisher`
+     - `dim_year`
+   - Luego se carga la tabla de hechos (con claves foráneas):
+     - `fact_sales`
 
 4. **Manejo de errores:**
    - Uso de `if_exists="replace"` para sobrescribir tablas existentes
    - Transacciones con `engine.begin()` para garantizar atomicidad
+
+### 8.2 Proceso de Carga con PySpark
+
+1. **Preparación del entorno:**
+   - Creación de la carpeta `warehouse` si no existe usando `os.makedirs("../warehouse", exist_ok=True)`
+   - Configuración de la ruta de la base de datos: `../warehouse/warehouse_pyspark.db`
+   - Creación del engine de SQLAlchemy: `sqlalchemy.create_engine(DB_URL)`
+
+2. **Conversión de DataFrames:**
+   - Los DataFrames de Spark se convierten a Pandas usando `toPandas()`:
+     ```python
+     dim_game.toPandas().to_sql("dim_game", conn, if_exists="replace", index=False)
+     dim_platform.toPandas().to_sql("dim_platform", conn, if_exists="replace", index=False)
+     dim_developer.toPandas().to_sql("dim_developer", conn, if_exists="replace", index=False)
+     dim_publisher.toPandas().to_sql("dim_publisher", conn, if_exists="replace", index=False)
+     dim_year.toPandas().to_sql("dim_year", conn, if_exists="replace", index=False)
+     fact_sales.toPandas().to_sql("fact_sales", conn, if_exists="replace", index=False)
+     ```
+
+3. **Carga en SQLite:**
+   - Todas las conversiones y cargas se realizan dentro de una transacción única con `engine.begin()`
+   - Esto garantiza que si falla alguna carga, se revierte toda la operación
+   - Uso de `if_exists="replace"` para sobrescribir tablas existentes
+   - `index=False` para evitar guardar el índice de Pandas como columna adicional
+
+4. **Ventajas del enfoque:**
+   - Aprovecha el procesamiento distribuido de Spark para la transformación
+   - Utiliza la simplicidad de Pandas/SQLAlchemy para la carga en SQLite
+   - Mantiene la integridad transaccional de los datos
+
+### 8.3 Diferencias entre Pandas y PySpark
+
+| Aspecto | Pandas | PySpark |
+|---------|--------|---------|
+| **Procesamiento** | En memoria (single machine) | Distribuido (cluster) |
+| **Carga a SQLite** | Directo con `to_sql()` | Conversión a Pandas primero con `toPandas()` |
+| **Escalabilidad** | Limitada por RAM | Escalable a grandes volúmenes |
+| **Sintaxis** | Más intuitiva | Más verbosa pero potente |
+| **Resultado** | Mismo modelo dimensional | Mismo modelo dimensional |
 
 ---
 
